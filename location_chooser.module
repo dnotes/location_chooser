@@ -1,0 +1,181 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ *
+ */
+
+/**
+ * Implementation of hook_menu()
+ */
+function location_chooser_menu() {
+  $items['admin/settings/location/site-default'] = array(
+    'title' => 'Site default location',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('location_chooser_location_form'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'location_chooser.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 11,
+  );
+  $items['admin/settings/location/location-chooser'] = array(
+    'title' => 'Location chooser settings',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('location_chooser_settings'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'location_chooser.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 11,
+  );
+  return $items;
+}
+
+/**
+ * Implementation of hook_form_alter()
+ */
+function location_chooser_form_alter(&$form, &$form_state, $form_id) {
+  // NODE FORMS --------------------------------------------
+  if (isset($form['type']) && $form['type']['#value'] . '_node_form' == $form_id) {
+
+    // BEGIN location chooser form
+    $targets = variable_get('location_chooser_targets', array());
+    $node_sources = variable_get('location_chooser_node_sources', array());
+    if (in_array($form['type']['#value'], $targets)) {
+      if ($node_sources[0]) {
+        $where[] = 'n.type IN (' . (count($node_sources) > 1 ? "'" . implode("', '", $node_sources) . "'" : "'{$node_sources[0]}'") . ')';
+      }
+      if (variable_get('location_chooser_user_source', TRUE)) {
+        $where[] = 'li.uid';
+      }
+      if (variable_get('location_chooser_default_source', TRUE)) {
+        $where[] = "li.genid = 'location_chooser_default'";
+      }
+      // only continue if there are sources from which to choose a location
+      if (is_array($where)) {
+
+        // Default location
+        $lid = $form['locations'][0]['#default_value']['lid'];                  // get the existing location ...
+        $permanent_lids = array();                                              // $permanent_lids is an array of permanent "source" $lids for the $form
+        $options = array();                                                     // $options are the choices in the select box
+        $settings = array();                                                    // $settings are the array that javascript uses to replace elements
+        if ($lid) {                                                             // if the location already exists
+          $options[$lid] = t('Custom');                                         // the $option for an existing custom location is the $lid
+          $settings[$lid] = $form['locations'][0]['#default_value'];            // javascript $settings are the current location
+        }                                                                       
+        else {                                                                  // if the location doesn't exist
+          $lid = 0;                                                             //   sanity check - set the $lid
+          $options[0] = t('Custom / None');                                     //   option for a new location
+          foreach (array_keys($form['locations'][0]['#location_settings']['form']['fields']) as $key) {
+            // if ($key != 'country') {
+              $settings[0][$key] = '';                                          // blank javascript array for choosing "Custom / None"
+            // }
+          }
+        }
+        $settings['def'] = $lid;                                                // sets the default $lid for javascript to revert on changes
+
+        // build query
+        $whereclause = implode(' OR ', $where);
+        $q = db_query("SELECT li.*, l.*, n.title FROM {location_instance} li
+                        LEFT JOIN {location} l ON l.lid = li.lid
+                        LEFT JOIN {node} n ON n.vid = li.vid
+                        WHERE $whereclause
+                        ORDER BY li.genid DESC, li.uid DESC, n.title ASC");
+
+        while ($r = db_fetch_array($q)) {
+          // $r is a database row that represents a location
+          // $t is the text to include in the location chooser form
+          if ($r['genid'] == 'location_chooser_default') {
+            $t = t('Site Default : ') . ($r['street'] ? $r['street'] . ', ' : '') . $r['city'] . ', ' . $r['province'];;
+            if (!$lid) {
+              $default = $r['lid'];
+              foreach ($r as $key => $value) {
+                if (isset($form['locations'][0]['#location_settings']['form']['fields'][$key]['default'])) {
+                  $form['locations'][0]['#location_settings']['form']['fields'][$key]['default'] = $r[$key];
+                }
+              }
+            }
+            $permanent_lids[] = $r['lid'];
+          }
+          elseif ($r['uid']) {
+            $t = t('User Location : ') . ($r['street'] ? $r['street'] . ', ' : '') . $r['city'] . ', ' . $r['province'];
+            $permanent_lids[] = $r['lid'];
+          }
+          elseif ($r['title']) {
+            $t = $r['title'] . ' : ' . ($r['street'] ? $r['street'] . ', ' : '') . $r['city'] . ', ' . $r['province'];;
+            if ($form['#node']->vid != $r['vid']) {
+              $permanent_lids[] = $r['lid'];
+            }
+          }
+          $options[$r['lid']] = $t;                                             // sets the $options for the location chooser form element
+          $settings[$r['lid']] = $r;                                            // sets the $settings for the javascript replacement
+        }
+        if (!in_array(t('Custom'), $options)) {                                 // if there is no "Custom" option, then we overwrote it with a permanent $lid...
+          $options[0] = t('Custom');                                            // ...but we still need an option for a new custom location
+        }
+
+        $form['location_chooser'] = array(
+          '#type' => 'select',
+          '#options' => $options,
+          '#title' => t('Choose location'),
+          '#weight' => 2,
+          '#default_value' => $default,
+        );
+        $form['location_permanent_lids'] = array(
+          '#type' => 'value',
+          '#value' => $permanent_lids,
+        );
+        array_unshift($form['#validate'], '_location_chooser_location_validate');
+        drupal_add_js(drupal_get_path('module', 'location_chooser') . '/js/location_chooser.js');
+        drupal_add_js(array('location_chooser' => $settings), 'setting');
+
+      }
+    }
+    // END location chooser form
+
+    if (isset($form['locations']) && variable_get('location_chooser_reuse_source_locations', FALSE) && in_array($form['type']['#value'], $node_sources)) {
+      array_unshift($form['#submit'], '_location_chooser_location_submit');
+    }
+
+    // BEGIN location display
+    if (isset($form['locations']) && !isset($form['location'])) {
+
+      if (variable_get('location_chooser_fieldset', 0) == 1) {
+        $form['location'] = array(
+          '#type' => 'fieldset',
+          '#title' => t('Locations'),
+          'locations' => $form['locations'],
+          '#weight' => $form['locations']['#weight'],
+        );
+        unset($form['locations']);
+      }
+      elseif (variable_get('location_chooser_fieldset', 0) == 2) {
+        drupal_add_css(drupal_get_path('module', 'location_chooser') . '/css/location_hidden.css');
+      }
+    }
+    // END location display
+
+  }
+}
+
+function _location_chooser_location_validate($form, &$form_state) {
+  // get the chosen location
+  $chooser = $form_state['values']['location_chooser'];
+  // only change the location if the one chosen is permanent (see form alter hook for permanent_lids)
+  if (is_array($form_state['values']['location_permanent_lids']) && in_array($chooser, $form_state['values']['location_permanent_lids'])) {
+    // load the location from lid
+    $location = location_load_location($chooser);
+    // fill the form location values with the values from the loaded location
+    // in case javascript is disabled and the user does not selects from location chooser select list
+    // Note: this may override user edits on existing locations if javascript is disabled and the user does not choose 'Custom'
+    $form_state['values']['locations'][0] = array_intersect_key($location, $form_state['values']['locations'][0]);
+    $form_state['values']['locations'][0]['lid'] = $chooser;
+  }
+}
+
+function _location_chooser_location_submit($form, &$form_state) {
+  if ($form_state['values']['locations'][0] && variable_get('location_chooser_reuse_source_locations', FALSE) && in_array($form_state['values']['type'], variable_get('location_chooser_node_sources', array()))) {
+    location_save($form_state['values']['locations'][0], FALSE); // this should reuse the lid
+    unset($form_state['values']['locations'][0]);
+  }
+}

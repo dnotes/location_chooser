@@ -1,0 +1,12 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ *
+ */
+
+function location_chooser_install() {
+  $weight = db_result(db_query("SELECT weight FROM {system} WHERE name = 'location' AND type = 'module'"));
+  db_query("UPDATE {system} SET weight = %d WHERE name = 'location_chooser' AND type = 'module'", $weight + 1);
+}

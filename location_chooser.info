@@ -1,0 +1,7 @@
+; $Id$
+name = Location Chooser
+description = Allows a choice of locations based on node or user locations
+package = Location
+dependencies[] = location
+dependencies[] = location_node
+core = 6.x

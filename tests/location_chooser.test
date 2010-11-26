@@ -1,0 +1,192 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ *
+ */
+require_once drupal_get_path('module', 'location') . '/tests/location_testcase.php';
+
+class LocationChooserTestCase extends LocationTestCase {
+
+  /**
+   * Implementation of getInfo().
+   */
+  function getInfo() {
+    return array(
+      'name' => 'Location chooser',
+      'description' => 'Tests all functionality of location chooser module.',
+      'group' => 'Location'
+    );
+  }
+
+  var $user;
+
+  function setUp() {
+
+    parent::setUp('location', 'location_node', 'location_user', 'location_chooser');
+    $this->user = $this->drupalCreateUser(array('access content', 'administer nodes',
+      'submit latitude/longitude', 'administer site configuration', 'access administration pages',
+      'administer content types', 'set own user location', 'view own user location', 'access user profiles'));
+    $this->drupalLogin($this->user);
+
+  }
+
+  function testLocationChooser() {
+    $settings = array();
+    $target[0] = $this->addLocationContentType($settings);
+    $target[1] = $this->addLocationContentType($settings);
+    $source[0] = $this->addLocationContentType($settings);
+    $source[1] = $this->addLocationContentType($settings);
+    $normalnode = $this->addLocationContentType($settings);
+
+    #variable_set('location_chooser_targets', array($target[0] => $target[0], $target[1] => $target[1]));
+    #variable_set('location_chooser_node_sources', array($source[0] => $source[0], $source[1] => $source[1]));
+
+    $this->drupalGet('admin/settings/location/location-chooser');
+    foreach ($target as $i => $iname) {
+      $this->assertNoFieldChecked("edit-location-chooser-targets-$iname", "Target $iname ($i) is not checked");
+      $edit["location_chooser_targets[$iname]"] = $iname;
+    }
+    foreach ($source as $i => $iname) {
+      $this->assertNoFieldChecked("edit-location-chooser-node-sources-$iname", "Source $iname ($i) is not checked");
+      $edit["location_chooser_node_sources[$iname]"] = $iname;
+    }
+    $this->drupalPost('admin/settings/location/location-chooser', $edit, t('Save configuration'));
+    foreach ($target as $i => $iname) {
+      $this->assertFieldChecked("edit-location-chooser-targets-$iname", "Target $iname ($i) is checked");
+    }
+    foreach ($source as $i => $iname) {
+      $this->assertFieldChecked("edit-location-chooser-node-sources-$iname", "Source $iname ($i) is checked");
+    }
+
+    $lc_weight = db_result(db_query("SELECT weight FROM {system} WHERE name = 'location_chooser'"));
+    $l_weight = db_result(db_query("SELECT weight FROM {system} WHERE name = 'location'"));
+    $this->assertTrue($lc_weight - $l_weight, "Location chooser weight is greater than Location weight ($lc_weight > $l_weight)");
+
+    foreach ($source as $i => $type) {
+      $sourcenode[$i] = $this->drupalCreateNode(array(
+        'type' => $type,
+        'title' => $type,
+        'locations' => array(
+          0 => array(
+            'name' => $type,
+            'location_settings' => $settings,
+          ),
+        ),
+      ));
+    }
+
+    $iterations = array(0 => 'Standard', 1 => 'Fieldset');
+
+    // testing nodes
+    foreach ($iterations as $i => $iname) {
+      variable_set('location_chooser_fieldset', $i);
+      $this->assertTrue(TRUE, "Started testing for $iname display on target nodes");
+      $edit = array('location_chooser' => $sourcenode[$i]->locations[0]['lid'], 'title' => $target[$i], 'body' => 'test node body');
+      $this->drupalPost("node/add/{$target[$i]}", $edit, t('Save'));
+      $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} WHERE name = '%s'", $source[$i])), "Found 1 locations like source ($count)");
+      $this->assertTrue(2 == $count = db_result(db_query("SELECT COUNT(*) FROM {location_instance} WHERE lid = '%s'", $sourcenode[$i]->locations[0]['lid'])), "Found 2 location instances like source ($count)");
+    }
+
+    // testing nodes that aren't enabled
+    $this->drupalGet("node/add/$normalnode");
+    $this->assertNoField('location_chooser', "Location chooser not found on non-target type $normalnode");
+
+    // testing user location
+    $array = variable_get('location_settings_user', array());
+    variable_set('location_settings_user', array_merge($array, array('multiple' => array('min' => '0', 'max' => '1', 'add' => '1'))));
+    $edit = array();
+    $edit['locations[0][name]'] = "My user location";
+    $this->drupalPost("user/{$this->user->uid}/edit", $edit, t('Save'));
+    $this->assertTrue($user_location = db_result(db_query("SELECT lid FROM {location_instance} WHERE uid = %d", $this->user->uid)));
+    $edit = array('location_chooser' => $user_location, 'title' => 'My user location', 'body' => 'test node body');
+    $this->drupalPost("node/add/{$target[0]}", $edit, t('Save'));
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} WHERE name = '%s'", 'My user location')), "Found 1 locations like source ($count)");
+    $this->assertTrue(2 == $count = db_result(db_query("SELECT COUNT(*) FROM {location_instance} WHERE lid = '%s'", $user_location)), "Found 2 location instances like source ($count)");
+
+    // testing changing a location
+    $this->clickLink('Edit');
+    $this->drupalPost(NULL, array('location_chooser' => $user_location), t('Save'));
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} WHERE lid = '%s'", $user_location)), "Found 1 locations with lid of $user_location ($count)");
+    $this->clickLink('Edit');
+    $this->drupalPost(NULL, array('locations[0][name]' => 'Changed location'), t('Save'));
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} WHERE name = '%s'", 'My user location')), "Found 1 locations like source ($count)");
+
+    // testing default location
+    $this->drupalPost('admin/settings/location/site-default', array('default_location[0][name]' => "Site default location"), t('Save'));
+    $this->assertTrue($default_location = db_result(db_query("SELECT lid FROM {location_instance} WHERE genid = '%s'", 'location_chooser_default')));
+    $edit = array('location_chooser' => $default_location, 'title' => 'Site default location', 'body' => 'test node body');
+    $this->drupalPost("node/add/{$target[0]}", $edit, t('Save'));
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} WHERE name = '%s'", 'Site default location')), "Found 1 locations like source ($count)");
+    $this->assertTrue(2 == $count = db_result(db_query("SELECT COUNT(*) FROM {location_instance} WHERE lid = '%s'", $default_location)), "Found 2 location instances like source ($count)");
+
+    // testing changing a source - should create a new location
+    $new_source_title = 'Change source location - reuse mode off';
+    $edit = array('locations[0][name]' => $new_source_title);
+    $this->drupalPost("node/{$sourcenode[1]->nid}/edit", $edit, t('Save'));
+    $lid = db_result(db_query("SELECT lid FROM {location_instance} WHERE nid = %d", $sourcenode[1]->nid));
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location_instance} WHERE lid = '%s' AND nid = '%s'", $lid, $sourcenode[1]->nid)), "Found 1 instances like source ($count)");
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} l LEFT JOIN {location_instance} li ON li.lid = l.lid WHERE l.name = '%s'", $new_source_title)), "Found 1 locations like source ($count)");
+    $sourcenode[1] = node_load(array('nid' => $sourcenode[1]->nid));
+
+
+    // TESTING OVERWRITE MODE ==================================================
+
+    $this->drupalPost('admin/settings/location/location-chooser', array('location_chooser_reuse_source_locations' => TRUE), t('Save configuration'));
+    $this->assertTrue(variable_get('location_chooser_reuse_source_locations', FALSE), 'TESTING OVERWRITE MODE');
+    variable_set('location_chooser_reuse_source_locations', TRUE);
+
+
+    $targetnode = $this->drupalCreateNode(array( // drupalCreateNode does not catch the location_chooser, so it will use the default location.
+      'type' => $target[1],
+      'title' => $target[1] . ' linked',
+    ));
+
+    // change the location to a different source
+    $edit = array('location_chooser' => $sourcenode[$i]->locations[0]['lid']);
+    $this->drupalPost("node/$targetnode->nid/edit", $edit, t('Save'));
+    $this->assertTrue(2 == $count = db_result(db_query("SELECT COUNT(*) FROM {location_instance} WHERE lid = '%s'", $sourcenode[1]->locations[0]['lid'])), "Found 2 instances like source ($count)");
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} l LEFT JOIN {location_instance} li ON li.lid = l.lid WHERE li.nid = %d AND l.name = '%s'", $sourcenode[1]->nid, $new_source_title)), "Found 1 locations like source ($count)");
+
+    // test changing a target
+    $name = $source[1] . '-changed';
+
+    // test changing the location settings on a target node with javascript disabled (the location chooser box does not change)
+    // this should do nothing - the location chooser box should override any custom settings
+    $edit = array('locations[0][name]' => $name);
+    $this->drupalPost("node/$targetnode->nid/edit", $edit, t('Save'));
+    $this->assertTrue(2 == $count = db_result(db_query("SELECT COUNT(*) FROM {location_instance} WHERE lid = '%s'", $sourcenode[1]->locations[0]['lid'])), "Found 2 instances like source ($count)");
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} l LEFT JOIN {location_instance} li ON li.lid = l.lid WHERE li.nid = %d AND l.name = '%s'", $sourcenode[1]->nid, $new_source_title)), "Found 1 locations like source ($count)");
+
+    // these settings should not overwrite a source location; instead, a new location should be created.
+    $edit = array('location_chooser' => 0, 'locations[0][name]' => $name,);
+    $this->drupalPost("node/$targetnode->nid/edit", $edit, t('Save'));
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} WHERE name = '%s'", $name)), "Found 1 locations like source ($count)");
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} l LEFT JOIN {location_instance} li ON li.lid = l.lid WHERE li.nid = %d AND l.name = '%s'", $sourcenode[1]->nid, $new_source_title)), "Found 1 locations like source ($count)");
+
+    // these settings should put everything back
+    $edit = array('location_chooser' => $sourcenode[1]->locations[0]['lid']);
+    $this->drupalPost("node/$targetnode->nid/edit", $edit, t('Save'));
+    $this->assertTrue(2 == $count = db_result(db_query("SELECT COUNT(*) FROM {location_instance} WHERE lid = '%s'", $sourcenode[1]->locations[0]['lid'])), "Found 3 instances like source ($count)");
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} l LEFT JOIN {location_instance} li ON li.lid = l.lid WHERE li.nid = %d AND l.name = '%s'", $sourcenode[1]->nid, $new_source_title)), "Found 1 locations like source ($count)");
+
+    // these settings, acting on the source node, should overwrite all linked locations
+    $new_source_title = 'Change source location - reuse mode ON';
+    $edit = array('locations[0][name]' => $new_source_title);
+    $this->drupalPost("node/{$sourcenode[1]->nid}/edit", $edit, t('Save'));
+    $sourcenode[1] = node_load(array('nid' => $sourcenode[1]->nid));
+    $this->assertTrue(2 == $count = db_result(db_query("SELECT COUNT(*) FROM {location_instance} WHERE lid = '%s'", $sourcenode[1]->locations[0]['lid'])), "Found 3 instances like source ($count)");
+    $this->assertTrue(1 == $count = db_result(db_query("SELECT COUNT(*) FROM {location} l LEFT JOIN {location_instance} li ON li.lid = l.lid WHERE li.nid = %d AND l.name = '%s'", $sourcenode[1]->nid, $new_source_title)), "Found 1 locations like source ($count)");
+    $this->drupalGet("node/$targetnode->nid");
+    $this->assertText($new_source_title);
+
+    // saving a node without a location
+    $locationless_node = $this->drupalCreateNode(array(
+      'type' => $source[1],
+      'title' => $source[1] . ' linked',
+    ));
+    $this->assertNull($locationless_node->locations[0], 'Locationless node saved without location');
+
+  }
+}
